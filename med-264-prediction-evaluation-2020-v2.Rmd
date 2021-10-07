@@ -1,0 +1,216 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r message=FALSE}
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(rms)
+library(synthpop)
+library(tidyr)
+library(plotly)
+library(sjPlot)
+library(performance)
+# install the 'mi' package if you are planning on redoing imputation on the original dataset. For now the imputed dataset has already been saved
+# library(mi)
+source('./helper functions.R')
+```
+
+Reading in original dataset, performing multiple imputation and writing out imputed dataset. This chunk commented out because we've already done this and saved the resulting file as our starting point.
+```{r echo=FALSE, warning=FALSE}
+# 
+# brinati_covid_study_v2 <- read_csv("data/brinati-covid_study_v2.csv",
+# col_types = cols(GENDER = col_factor(levels = c("M",
+# "F")), SWAB = col_factor(levels = c("0",
+# "1"))))
+# brinati_covid_study_v2 <- brinati_covid_study_v2 %>% mutate_if(is.numeric, .funs = function(x) {x+0.001})
+# brainati.mi <- missing_data.frame(as.data.frame(brinati_covid_study_v2), favor_positive = TRUE)
+# 
+# 
+# brainati.mi<-change(brainati.mi, y=c('Lymphocytes', 'Basophils', 'Monocytes','Eosinophils', 'Basophils'), what='type', to='positive-continuous')
+# show(brainati.mi)
+# image(brainati.mi)
+# 
+# options(mc.cores = 4)
+# imputations <- mi(brainati.mi, n.iter = 90, n.chains = 4, max.minutes = 20) 
+# show(imputations)
+# round(mipply(imputations, mean, to.matrix = TRUE), 3)
+# Rhats(imputations)
+# dfs <- complete(imputations, m=2)
+# brinati_covid_v2.imputed <- dfs[[1]][,1:16]
+# write.csv(brinati_covid_v2.imputed, file='./data/brinati-covid_study_v2_imputed.csv', row.names = FALSE)
+```
+
+Read in dataset from Brinati paper. Dataset already been imputed based on code above. 
+```{r}
+require(readr)
+brinati_covid_study_v2.imputed <- read_csv("data/brinati-covid_study_v2_imputed.csv",
+  col_types = cols(GENDER = col_factor(levels = c("M",
+  "F")), SWAB = col_factor(levels = c("0",
+  "1"))))
+```
+
+
+```{r}
+
+glm.orig.fit<-glm(SWAB ~ ., brinati_covid_study_v2.imputed, family='binomial')
+glm.orig.fit
+write.csv(summary(glm.orig.fit)$coef, file='output/OR-original-model.csv', row.names = FALSE)
+predicted = plogis(predict(glm.orig.fit))
+observed = brinati_covid_study_v2.imputed$SWAB
+assessPerf(predicted, observed)
+p<-plot_model(glm.orig.fit)
+p<-ApplyFigureThemeLargeFontOnly(p + ylim(.1, 2.5) ) 
+  
+p
+ggsave(filename = 'figs/OR-original-model.png', plot=p, width=6, height=6, units='in', dpi=300)
+```
+
+# Draw ROC curve
+```{r}
+cms.cutoffs <- lapply(seq(0.01,0.99,0.01), function(cutoff) {
+  ret=confusionMatrix(predicted, observed, cutoff=cutoff)
+  ret$cutoff = cutoff
+  ret
+  })
+ff<-data.frame(t(sapply(cms.cutoffs, function(cf) c("Cutoff"=cf$cutoff, "Sensitivty"=cf$sens, "Specificity"=cf$spec))))
+colnames(ff) <- c('Cutoff', 'Sensitivity','Specificity')
+
+
+cutoffs_to_plot <- c(0.09, 0.3, 0.6, 0.9)
+p <- ApplyFigureTheme(ff %>% mutate(fpr=1-Specificity) %>% filter(Cutoff %in% cutoffs_to_plot) %>%
+  ggplot(., aes(x=fpr, y=Sensitivity)) + 
+    geom_point(size=3, color='darkblue') + xlim(0,1) + ylim(0,1)+
+    xlab('False Positive Rate\n(1-Specificity)') + ylab('True Positive Rate\n(Sensitivity)')
+  )
+ggsave(filename = 'figs/example-sens-spec-on-roc.png', plot=p, width=6, height=6, units='in', dpi=300)
+
+for (cutoff in lapply(1:length(cutoffs_to_plot), function(i) cutoffs_to_plot[1:i])) {
+  p <- ApplyFigureTheme(ff %>% mutate(fpr=1-Specificity) %>% filter(Cutoff %in% cutoff) %>%
+    ggplot(., aes(x=fpr, y=Sensitivity)) + 
+      geom_point(size=3, color='darkblue') + xlim(0,1) + ylim(0,1)+
+      xlab('False Positive Rate\n(1-Specificity)') + ylab('True Positive Rate\n(Sensitivity)')
+  )
+  ggsave(filename = paste0('figs/example-sens-spec-on-roc-', cutoff[length(cutoff)],  '.png'), 
+         plot=p, width=6, height=6, units='in', dpi=300)
+}
+p <- ApplyFigureTheme(
+  ggplot(ff, aes(x=1-Specificity, y=Sensitivity)) + geom_line()+ 
+    geom_ribbon(aes(ymin = 0, ymax=Sensitivity), color=NA, fill='blue',alpha=0.3) + 
+    xlim(0,1) + ylim(0,1)+
+      xlab('False Positive Rate\n(1-Specificity)') + ylab('True Positive Rate\n(Sensitivity)') 
+)
+ggsave(filename = 'figs/example-roc.png', 
+         plot=p, width=6, height=6, units='in', dpi=300)
+p <- ff %>% mutate(fpr=1-Specificity) %>%
+  ggplot(., aes(x=fpr, y=Sensitivity)) + geom_point(aes(frame=Cutoff)) +
+    xlab('False Positive Rate (1-Specificity)') + ylab('True Positive Rate\n(Sensitivity)')
+  
+  
+ggplotly(p)
+```
+
+# Draw calibration
+```{r}
+cal_breaks = seq(0, 1, .1)
+cal_deciles <- data.frame(Predicted=predicted, Observed = as.integer(as.character(observed))) %>%
+  mutate(Bins = cut(Predicted, breaks=cal_breaks, include.lowest = TRUE))
+cal_deciles_summary <- cal_deciles %>% group_by(Bins) %>% summarise(n=n(), Average_Observed = mean(Observed),
+                                                                    Average_Predicted=mean(Predicted)) 
+
+
+for (cutoff in lapply(1:nrow(cal_deciles_summary), function(i) cal_deciles_summary$Bins[1:i])) {
+  p<-ApplyFigureThemeCalCurvePoints(
+    ggplot(cal_deciles_summary %>% filter(Bins %in% cutoff), aes(x=Average_Predicted, y=Average_Observed)) )
+  p<-ApplyFigureThemeLargeFontOnly(p)
+  SaveStdSquareFigure(p, filename = paste0('figs/example-cal-curve-points-', cutoff[length(cutoff)],  '.png'))
+}
+
+p<-ApplyFigureThemeCalCurvePoints(ggplot(cal_deciles_summary , aes(x=Average_Predicted, y=Average_Observed)) )
+p<-ApplyFigureThemeLargeFontOnly(p)
+
+SaveStdSquareFigure(p, 'figs/cal-curve-deciles-all.png')
+
+p<-p + geom_smooth(method='lm', se=FALSE)
+SaveStdSquareFigure(p, 'figs/cal-curve-deciles-all-with-bestfit.png')
+p
+            
+```
+
+Calculate hosmer lemeshow statistics
+```{r}
+
+hl.org <- performance_hosmer(glm.orig.fit)
+hl.org
+```
+
+Create smoothed cal curve from Van hoorde et al
+```{r}
+p<-CreateSmoothedCalCurvePlot(predicted, observed)
+p<-ApplyFigureThemeLargeFontOnly(p)
+SaveStdSquareFigure(p, 'figs/smoothed-cal-curve-orig-data.png')
+p
+```
+
+Boot strap performance in the original dataset
+```{r warning=FALSE, echo=FALSE}
+df <- as.data.frame(brinati_covid_study_v2.imputed)
+nBoot = 100
+set.seed(1342349)
+trainIdxBoot <- lapply(1:nBoot, function(i) sample(1:nrow(df), size=nrow(df), replace=TRUE))
+
+bootPerf.origdata <- lapply(trainIdxBoot, 
+                   function(trainIdx) 
+                     assessSingleTrainTest(trainIdx, (1:nrow(df))[-trainIdx], df, glm.model = SWAB~ ., outcome.var.name = 'SWAB')
+                   ) 
+
+measures = c('C (ROC)', 'Brier', 'Intercept', 'Slope')
+brinati.orig.boot.perf <- data.frame(matrix(
+  unlist(lapply(bootPerf.origdata, function(boot) boot$test.perf)), 
+  nrow = nBoot, byrow = TRUE))
+colnames(brinati.orig.boot.perf) <- names(bootPerf.origdata[[1]]$test.perf)
+
+brinati.orig.boot.perf <- gather(brinati.orig.boot.perf, Measure, Value, Dxy:`S:p`, factor_key = TRUE)
+p<-ggplot(brinati.orig.boot.perf %>% filter(Measure %in% measures), aes(x=Measure, y=Value,  color=Measure)) + geom_boxplot() +
+  geom_point(data=data.frame(Measure = measures, Value = c(1, 0, 0, 1)), size=3, color='blue') + theme_bw()
+p<-ApplyFigureTheme(p)
+SaveStdSquareFigure(p, 'figs/orig-model-bootstrap-evaluation.png')
+p
+```
+
+# Assess performance in external validation
+
+II. Look at performance as a function of prevalence
+```{r}
+prevalences = seq(0.01, 0.99, 0.01)
+brinati.syn.factory = generateSyntheticDataFactory(baseDF = brinati_covid_study_v2.imputed, method = 'boot')
+dfs_prevs <- lapply(prevalences, function (prev) brinati.syn.factory(prev = prev))
+dfs.prevs.perf <- lapply(dfs_prevs, function(df) {
+  assessPerf(predicted = plogis(predict(glm.orig.fit, newdata=as.data.frame(df))), observed = df$SWAB)
+})
+```
+
+Calculate the different validation measures
+```{r}
+
+dfs.prevs.perf.df <- data.frame(matrix(unlist(dfs.prevs.perf), nrow = length(prevalences), byrow = TRUE))
+colnames(dfs.prevs.perf.df) <- names(dfs.prevs.perf[[1]])
+dfs.prevs.perf.df$Prevalence = prevalences
+dfs.prevs.perf.df <- gather(dfs.prevs.perf.df, Measure, Value, Dxy:`S:p`, factor_key = TRUE)
+```
+
+Plot the distribution of validation measures
+```{r}
+measures = c('C (ROC)', 'Brier', 'Intercept', 'Slope')
+p<-ggplot(dfs.prevs.perf.df %>% filter(Measure %in% measures), aes(x=Measure, y=Value,  color=Measure)) + geom_boxplot() +
+  geom_point(data=data.frame(Measure = measures, Value = c(1, 0, 0, 1)), size=3, color='blue') + theme_bw()
+p<-ApplyFigureThemeLargeFontOnly(p)
+SaveMedRectFigure(p, 'figs/change-in-metrics-due-to-prevalence-boxplot.png')
+p
+p<-ggplot(dfs.prevs.perf.df %>% filter(Measure %in% measures), aes(x=Prevalence, y=Value,  color=Measure, group=Measure)) + geom_line(size=1.3) + theme_bw()
+p<-ApplyFigureThemeLargeFontOnly(p)
+SaveMedRectFigure(p, 'figs/change-in-metrics-due-to-prevalence-linearplot.png')
+p
+```
+
