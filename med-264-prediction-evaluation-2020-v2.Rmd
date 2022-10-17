@@ -44,7 +44,7 @@ Reading in original dataset, performing multiple imputation and writing out impu
 
 Read in dataset from Brinati paper. Dataset already been imputed based on code above. 
 ```{r}
-require(readr)
+
 brinati_covid_study_v2.imputed <- read_csv("data/brinati-covid_study_v2_imputed.csv",
   col_types = cols(GENDER = col_factor(levels = c("M",
   "F")), SWAB = col_factor(levels = c("0",
@@ -212,5 +212,21 @@ p<-ggplot(dfs.prevs.perf.df %>% filter(Measure %in% measures), aes(x=Prevalence,
 p<-ApplyFigureThemeLargeFontOnly(p)
 SaveMedRectFigure(p, 'figs/change-in-metrics-due-to-prevalence-linearplot.png')
 p
+```
+
+# Calculate Decision Curve
+```{r}
+cms.cutoffs <- lapply(seq(0.01,0.99,0.01), function(cutoff) {
+  ret=confusionMatrix(predicted, observed, cutoff=cutoff)
+  ret$cutoff = cutoff
+  ret
+  })
+
+calculate_net_benefit_at_threshold_for_sensitivity_and_specificity <- function(sens, spec, threshold) {
+  sens - (1-spec)*(threshold/(1-threshold))
+}
+netbenefit_across_thresholds = sapply(cms.cutoffs, function(cutoff_values) calculate_net_benefit_at_threshold_for_sensitivity_and_specificity(cutoff_values$sens, cutoff_values$spec, cutoff_values$cutoff))
+netbenefit_vs_thresholds = data.frame(thresholds = sapply(cms.cutoffs, function(cutoff_values) cutoff_values$cutoff), netbenefit = netbenefit_across_thresholds)
+ggplot(netbenefit_vs_thresholds, aes(x=thresholds, y=netbenefit)) + geom_line() + ylab("Net Benefit") + xlab("Threshold to Act") + theme_bw()
 ```
 
